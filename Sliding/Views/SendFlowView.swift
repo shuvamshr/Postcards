@@ -50,6 +50,9 @@ struct ComposeScreen: View {
     @State private var camera = CameraModel()
     @State private var pickerItem: PhotosPickerItem?
     @State private var isCapturing = false
+    /// Where the viewfinder was last tapped to focus; a new id replays the focus square.
+    @State private var focusPoint: CGPoint?
+    @State private var focusTap = UUID()
     @FocusState private var captionFocused: Bool
 
     private static let maxLength = 60
@@ -164,7 +167,18 @@ struct ComposeScreen: View {
                     .scaledToFill()
                     .transition(.opacity)
             } else if let session = camera.session {
-                CameraPreview(session: session)
+                CameraPreview(session: session) { viewPoint, devicePoint in
+                    camera.focus(at: devicePoint)
+                    focusPoint = viewPoint
+                    focusTap = UUID()
+                }
+                .overlay(alignment: .topLeading) {
+                    if let focusPoint {
+                        FocusSquare()
+                            .id(focusTap)
+                            .position(focusPoint)
+                    }
+                }
             } else {
                 // No camera (the Simulator): a dark viewfinder, so a taken photo is clearly different.
                 ZStack {
@@ -339,6 +353,26 @@ struct ComposeScreen: View {
             draft.photo = original.cropped(scale: draft.cropScale, offset: draft.cropOffset)
         }
         withAnimation(.spring(duration: 0.6)) { stage = .write }
+    }
+}
+
+/// The square that marks a tap-to-focus point: it lands slightly large, settles, then fades.
+private struct FocusSquare: View {
+    @State private var settled = false
+    @State private var visible = true
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Theme.yellow, lineWidth: 2)
+            .frame(width: 76, height: 76)
+            .scaleEffect(settled ? 1 : 1.4)
+            .opacity(visible ? 1 : 0)
+            .allowsHitTesting(false)
+            .task {
+                withAnimation(.spring(duration: 0.3, bounce: 0.3)) { settled = true }
+                try? await Task.sleep(for: .seconds(1.2))
+                withAnimation(.easeOut(duration: 0.4)) { visible = false }
+            }
     }
 }
 
