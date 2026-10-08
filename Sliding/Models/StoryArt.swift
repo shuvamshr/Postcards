@@ -74,20 +74,35 @@ struct MessageText: View {
     var showsCursor = false
     let scale: CGFloat
 
+    /// When the text last changed; the cursor stays solid while typing and blinks once you pause.
+    @State private var lastEdit = Date.now
+
     var body: some View {
-        Group {
-            if text.isEmpty, let placeholder {
-                Text(placeholder).foregroundStyle(Theme.muted.opacity(0.5))
-            } else if showsCursor {
-                Text("\(text)\(Text("|").foregroundStyle(Theme.orange))")
-            } else {
-                Text(text)
+        TimelineView(.periodic(from: .now, by: 0.1)) { context in
+            let since = context.date.timeIntervalSince(lastEdit)
+            let cursorOn = since < 0.6 || Int(since / 0.5).isMultiple(of: 2)
+            // The cursor keeps its space while hidden, so the text never shifts as it blinks.
+            let cursor = Text("|").foregroundStyle(Theme.orange.opacity(cursorOn ? 1 : 0))
+
+            Group {
+                if text.isEmpty, let placeholder {
+                    if showsCursor {
+                        Text("\(cursor)\(Text(placeholder).foregroundStyle(Theme.muted.opacity(0.5)))")
+                    } else {
+                        Text(placeholder).foregroundStyle(Theme.muted.opacity(0.5))
+                    }
+                } else if showsCursor {
+                    Text("\(text)\(cursor)")
+                } else {
+                    Text(text)
+                }
             }
+            .font(Theme.display(StoryArt.messageFontSize(for: text) * scale))
+            .minimumScaleFactor(0.3)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .font(Theme.display(StoryArt.messageFontSize(for: text) * scale))
-        .minimumScaleFactor(0.3)
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: text) { lastEdit = .now }
     }
 }
 

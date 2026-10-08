@@ -103,6 +103,14 @@ struct ContentView: View {
             .animation(.spring, value: model.toast)
             .animation(.spring, value: path.isEmpty)
         }
+        .overlay {
+            if model.isShowingHowToPlay {
+                HowToPlayOverlay {
+                    withAnimation(.easeOut(duration: 0.2)) { model.isShowingHowToPlay = false }
+                }
+                .transition(.opacity)
+            }
+        }
         .sheet(isPresented: $showConnections) {
             ConnectionsSheet()
                 .environment(model)

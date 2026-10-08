@@ -16,7 +16,7 @@ struct SlidingApp: App {
             ContentView()
                 .environment(model)
                 .tint(Theme.ink)
-                .preferredColorScheme(.light)
+                .preferredColorScheme(model.isOnDarkPage ? .dark : .light)
         }
     }
 }

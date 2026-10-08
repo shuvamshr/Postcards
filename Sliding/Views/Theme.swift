@@ -116,6 +116,8 @@ struct PuzzleTray<Content: View>: View {
 struct SegmentedSwitch: View {
     let options: [String]
     @Binding var selection: Int
+    /// Light text on a faint track, for use on the dark puzzle tray.
+    var onDark = false
     @Namespace private var knob
 
     var body: some View {
@@ -126,9 +128,9 @@ struct SegmentedSwitch: View {
                 } label: {
                     Text(options[index])
                         .font(Theme.body(15, weight: .semibold))
-                        .foregroundStyle(selection == index ? Theme.ink : Theme.muted)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
+                        .foregroundStyle(selection == index ? Theme.ink : (onDark ? .white.opacity(0.6) : Theme.muted))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(minHeight: 38)
                         .background {
                             if selection == index {
                                 Capsule().fill(Theme.paper).matchedGeometryEffect(id: "knob", in: knob)
@@ -140,7 +142,7 @@ struct SegmentedSwitch: View {
             }
         }
         .padding(4)
-        .background(Theme.sand, in: Capsule())
+        .background(onDark ? .white.opacity(0.1) : Theme.sand, in: Capsule())
     }
 }
 

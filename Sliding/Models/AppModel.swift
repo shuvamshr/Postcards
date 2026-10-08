@@ -13,6 +13,10 @@ final class AppModel {
     var toast: String?
     /// Whether the send flow is showing.
     var isComposing = false
+    /// Whether a dark page (the puzzle) is showing, so the app switches its chrome to dark.
+    var isOnDarkPage = false
+    /// Whether the how-to-play overlay is showing. Drawn at the app root so it covers the toolbar too.
+    var isShowingHowToPlay = false
     private(set) var isLoaded = false
 
     init() {

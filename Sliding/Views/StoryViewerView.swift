@@ -6,63 +6,129 @@
 import SwiftUI
 
 /// Solve a story: the photo on the front, the message on the back, sliding together in a dark tray.
+/// Tap tiles to slide them, hold the board to peek at the photo, shake the phone to shuffle.
 struct StoryViewerView: View {
     let story: Story
+    @Environment(AppModel.self) private var model
+    /// The overlay opens on its own the first time someone plays.
+    @AppStorage("hasSeenHowToPlay") private var hasSeenHowToPlay = false
     @State private var face = 0   // 0 photo, 1 message
-    @State private var peeking = false
     @State private var celebrating = false
     /// Set each time the puzzle is solved; a new value restarts the confetti.
     @State private var confetti: UUID?
+    /// True while a finger is held on the board long enough to count as a peek.
+    @GestureState private var holding = false
+    /// Lifting a finger after a peek can also register as a tap; ignore that one.
+    @State private var ignoreNextTap = false
+
+    /// Card geometry. Inner corners are the outer corner minus the padding, so everything nests:
+    /// the board, and the switch's rounded ends (its height is twice the inner radius).
+    private static let cardPadding: CGFloat = 12
+    private static let cardRadius: CGFloat = 34
+    private static let innerRadius = cardRadius - cardPadding
+    /// The page is darker than the card so the card still stands out as its own object.
+    private static let pageColor = Color(red: 0.06, green: 0.06, blue: 0.065)
 
     private var flipped: Bool { face == 1 }
+    private var canPeek: Bool { !flipped && !story.isSolved }
+    private var peeking: Bool { holding && canPeek }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 18) {
+        VStack(spacing: 0) {
+            Spacer(minLength: 16)
+
+            // One dark card, like a post: who sent it, the puzzle, and the Photo / Message switch.
+            VStack(spacing: Self.cardPadding) {
                 sender
+                    .padding(.leading, 4)
+                    .padding(.trailing, 2)
+                    .padding(.vertical, 4)
 
-                PuzzleTray {
-                    FlipCard(angle: flipped ? 180 : 0) {
-                        PuzzleBoard(puzzle: story.puzzle, tiles: story.photoTiles, whole: story.photo,
-                                    cornerRadius: 26, onTap: slide)
-                    } back: {
-                        PuzzleBoard(puzzle: story.puzzle, tiles: story.messageTiles, whole: story.message,
-                                    cornerRadius: 26, onTap: slide)
-                    }
-                    .overlay { peekOverlay }
+                FlipCard(angle: flipped ? 180 : 0) {
+                    PuzzleBoard(puzzle: story.puzzle, tiles: story.photoTiles, whole: story.photo,
+                                cornerRadius: Self.innerRadius, onTap: slide)
+                } back: {
+                    PuzzleBoard(puzzle: story.puzzle, tiles: story.messageTiles, whole: story.message,
+                                cornerRadius: Self.innerRadius, onTap: slide)
                 }
-                .scaleEffect(celebrating ? 1.03 : 1)
+                .overlay { peekOverlay }
+                .simultaneousGesture(peekGesture, isEnabled: canPeek)
 
-                SegmentedSwitch(options: ["Photo", "Message"], selection: $face)
+                SegmentedSwitch(options: ["Photo", "Message"], selection: $face, onDark: true)
+                    .frame(height: Self.innerRadius * 2)
                     .animation(.spring(duration: 0.6), value: face)
-
-                if story.isSolved {
-                    unlocked
-                } else {
-                    playControls
-                }
             }
-            .foregroundStyle(Theme.ink)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 24)
-            .animation(.spring, value: story.isSolved)
+            .padding(Self.cardPadding)
+            .background(Theme.ink, in: RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous))
+            .overlay {
+                // A hairline edge separates the card from the dark page.
+                RoundedRectangle(cornerRadius: Self.cardRadius, style: .continuous)
+                    .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.5), radius: 24, y: 12)
+            .scaleEffect(celebrating ? 1.03 : (peeking ? 0.985 : 1))
+            .animation(.spring(duration: 0.25), value: peeking)
+
+            if story.isSolved {
+                unlocked
+                    .padding(.top, 28)
+            }
+
+            Spacer(minLength: 24)
         }
+        .foregroundStyle(Theme.ink)
+        .padding(.horizontal, 22)
+        .padding(.bottom, 16)
+        .animation(.spring, value: story.isSolved)
         .overlay {
             if let confetti {
                 Celebration { self.confetti = nil }
                     .id(confetti)
             }
         }
-        .screenBackground()
-        // The sender header carries the title, so the bar only holds the back button.
+        .background {
+            ZStack {
+                Self.pageColor
+                Waves(color: .white.opacity(0.035), lineWidth: 26)
+            }
+            .ignoresSafeArea()
+        }
+        // Dark page: switch the app's chrome (status bar, back button) to dark while it's showing.
+        .onAppear { model.isOnDarkPage = true }
+        .onDisappear { model.isOnDarkPage = false }
+        // The card shows who sent it, so the bar only holds back and help.
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { story.isNew = false }
-        .sensoryFeedback(.selection, trigger: story.moves)
-        .sensoryFeedback(.success, trigger: story.isSolved) { _, solved in solved }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                // Same Liquid Glass circle as the back button.
+                Button("How to play", systemImage: "questionmark") { showHowToPlay() }
+                    .labelStyle(.iconOnly)
+                    .tint(.white)
+            }
+        }
+        .onAppear {
+            story.isNew = false
+            if !hasSeenHowToPlay {
+                hasSeenHowToPlay = true
+                showHowToPlay()
+            }
+        }
+        .onChange(of: holding) { _, nowHolding in
+            if nowHolding {
+                ignoreNextTap = true
+                if canPeek { Haptics.shared.tick(intensity: 0.5) }
+            } else {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    ignoreNextTap = false
+                }
+            }
+        }
         .onChange(of: story.isSolved) { _, solved in
             guard solved else { return }
             confetti = UUID()
+            Haptics.shared.celebrate()
             // A small bounce as the last piece drops in.
             withAnimation(.spring(duration: 0.3, bounce: 0.5)) { celebrating = true }
             Task {
@@ -70,83 +136,83 @@ struct StoryViewerView: View {
                 withAnimation(.spring(duration: 0.4)) { celebrating = false }
             }
         }
+        .onShake { reshuffle() }
     }
 
+    /// The post header: avatar, name and when it was sent, with the puzzle size on the right.
     private var sender: some View {
         HStack(spacing: 12) {
-            Avatar(name: story.from, size: 46)
+            Avatar(name: story.from, size: 36, ringed: true)
             VStack(alignment: .leading, spacing: 1) {
-                Text(story.from).font(Theme.display(20))
-                Text("\(story.sentAt, format: .relative(presentation: .named)) · \(story.n)×\(story.n) puzzle")
-                    .font(Theme.body(14, weight: .medium))
-                    .foregroundStyle(Theme.muted)
+                Text(story.from).font(Theme.display(17))
+                Text(story.sentAt, format: .relative(presentation: .named))
+                    .font(Theme.body(13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
             }
-            Spacer()
+            Spacer(minLength: 0)
+            Text("\(story.n)×\(story.n)")
+                .font(Theme.body(13, weight: .semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.white.opacity(0.12), in: Capsule())
         }
+        .foregroundStyle(.white)
+        .accessibilityElement(children: .combine)
     }
 
-    /// The finished picture (or message), shown while "Hold to peek" is pressed.
+    /// Press and hold the board, then keep holding: a peek lasts until the finger lifts.
+    private var peekGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.35, maximumDistance: 20)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .updating($holding) { value, state, _ in
+                if case .second(true, _) = value { state = true }
+            }
+    }
+
+    /// The finished photo, shown while the board is held. Photo side only.
     private var peekOverlay: some View {
-        Image(uiImage: flipped ? story.message : story.photo)
+        Image(uiImage: story.photo)
             .resizable()
             .aspectRatio(1, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .opacity(peeking && !story.isSolved ? 1 : 0)
+            .clipShape(RoundedRectangle(cornerRadius: Self.innerRadius, style: .continuous))
+            .overlay(alignment: .top) {
+                Label("Peeking", systemImage: "eye.fill")
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.45), in: Capsule())
+                    .padding(12)
+            }
+            .opacity(peeking ? 1 : 0)
             .animation(.easeOut(duration: 0.15), value: peeking)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
 
-    private var playControls: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 12) {
-                Label("Hold to peek", systemImage: peeking ? "eye.fill" : "eye")
-                    .font(Theme.body(16, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(peeking ? Theme.ink : Theme.sand,
-                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .foregroundStyle(peeking ? .white : Theme.ink)
-                    .onLongPressGesture(minimumDuration: 0, maximumDistance: 60) {
-                    } onPressingChanged: { pressing in
-                        peeking = pressing
-                    }
-                    .sensoryFeedback(.impact(weight: .light), trigger: peeking) { _, now in now }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Shows the finished picture while you hold it.")
-
-                Button("Reshuffle", systemImage: "shuffle") { reshuffle() }
-                    .buttonStyle(CircleButtonStyle(size: 54))
-            }
-
-            Text("Tap a tile next to the gap to slide it. Stuck? Peek, or switch to Message. The words can help.")
-                .font(Theme.body(14))
-                .foregroundStyle(Theme.muted)
-                .multilineTextAlignment(.center)
-        }
+    private func showHowToPlay() {
+        withAnimation(.easeOut(duration: 0.2)) { model.isShowingHowToPlay = true }
     }
 
     private var unlocked: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: "gift.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 44, height: 44)
-                    .background(.white.opacity(0.25), in: Circle())
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Story unlocked!").font(Theme.display(18))
-                    Text(flipped ? "\(story.from) will be glad you saw it." : "Switch to Message to read it.")
-                        .font(Theme.body(14, weight: .medium))
-                        .opacity(0.85)
-                }
-                Spacer(minLength: 0)
+        HStack(spacing: 12) {
+            Image(systemName: "gift.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .background(.white.opacity(0.25), in: Circle())
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Story unlocked!").font(Theme.display(18))
+                Text(flipped ? "\(story.from) will be glad you saw it." : "Switch to Message to read it.")
+                    .font(Theme.body(14, weight: .medium))
+                    .opacity(0.85)
             }
-            .foregroundStyle(.white)
-            .padding(14)
-            .wavyCard(Theme.orange)
-            .floaty(tilt: -1, seed: 0.6)
-            .transition(.scale(scale: 0.9).combined(with: .opacity))
+            Spacer(minLength: 0)
         }
+        .foregroundStyle(.white)
+        .padding(14)
+        .wavyCard(Theme.orange)
+        .floaty(tilt: -1, seed: 0.6)
+        .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
 
     private func reshuffle() {
@@ -154,11 +220,19 @@ struct StoryViewerView: View {
             story.puzzle.shuffle()
             story.moves = 0
         }
+        Haptics.shared.shuffle()
     }
 
     private func slide(_ position: Int) {
-        withAnimation(.snappy(duration: 0.2)) {
-            if story.puzzle.move(position) { story.moves += 1 }
+        if ignoreNextTap {
+            ignoreNextTap = false
+            return
         }
+        var moved = false
+        withAnimation(.snappy(duration: 0.2)) {
+            moved = story.puzzle.move(position)
+            if moved { story.moves += 1 }
+        }
+        if moved { Haptics.shared.tick() }
     }
 }

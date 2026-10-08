@@ -134,7 +134,7 @@ struct ComposeScreen: View {
             guard let item else { return }
             Task {
                 if let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                    use(image)
+                    usePicked(image)
                 }
                 pickerItem = nil
             }
@@ -155,7 +155,10 @@ struct ComposeScreen: View {
     /// Live camera until a photo is taken, then the photo itself.
     private var photoSide: some View {
         ZStack {
-            if let photo = draft.photo {
+            if stage == .review, let original = draft.original {
+                // Picked from the library: pinch and drag to choose the square.
+                PhotoCropper(image: original, scale: $draft.cropScale, offset: $draft.cropOffset)
+            } else if let photo = draft.photo {
                 Image(uiImage: photo)
                     .resizable()
                     .scaledToFill()
@@ -176,6 +179,7 @@ struct ComposeScreen: View {
                 }
             }
             GridOverlay(n: draft.gridSize)
+                .allowsHitTesting(false)
         }
         .aspectRatio(1, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -185,7 +189,7 @@ struct ComposeScreen: View {
         MessagePaper(from: "You") { scale in
             MessageText(text: draft.caption, placeholder: Self.placeholder,
                         showsCursor: captionFocused, scale: scale)
-                .animation(.snappy, value: draft.caption.count)
+                .transaction { $0.animation = nil }   // keystrokes appear instantly
         }
         .overlay(GridOverlay(n: draft.gridSize, color: Theme.sand))
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -285,7 +289,9 @@ struct ComposeScreen: View {
                 ? "Find a moment worth puzzling over. It becomes a \(draft.gridSize)×\(draft.gridSize) puzzle."
                 : "No camera here, so the shutter grabs a sample photo. Or pick one from your library."
         case .review:
-            "Looking good? Use it, or try another."
+            draft.original == nil
+                ? "Looking good? Use it, or try another."
+                : "Pinch to zoom and drag to frame it."
         case .write:
             ""
         }
@@ -310,9 +316,18 @@ struct ComposeScreen: View {
         camera.stop()
     }
 
+    /// A library photo: keep the whole thing so the preview can crop it; start centered and filling the frame.
+    private func usePicked(_ image: UIImage) {
+        draft.original = image.normalized()
+        draft.cropScale = 1
+        draft.cropOffset = .zero
+        use(image)
+    }
+
     private func retake() {
         withAnimation(.snappy) {
             draft.photo = nil
+            draft.original = nil
             stage = .capture
         }
         Task { await camera.start() }
@@ -320,6 +335,9 @@ struct ComposeScreen: View {
 
     /// Flip to the message side. The keyboard opens from `.task(id: stage)` once the flip lands.
     private func approve() {
+        if let original = draft.original {
+            draft.photo = original.cropped(scale: draft.cropScale, offset: draft.cropOffset)
+        }
         withAnimation(.spring(duration: 0.6)) { stage = .write }
     }
 }

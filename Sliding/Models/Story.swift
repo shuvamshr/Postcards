@@ -56,4 +56,8 @@ final class SendDraft {
     var photo: UIImage?
     var caption = ""
     var gridSize = 3
+    /// A photo picked from the library, kept whole so it can be cropped in the preview.
+    var original: UIImage?
+    var cropScale: CGFloat = 1
+    var cropOffset: CGSize = .zero
 }
