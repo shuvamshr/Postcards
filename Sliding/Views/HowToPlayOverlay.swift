@@ -15,7 +15,6 @@ struct HowToPlayOverlay: View {
     private let steps: [(symbol: String, color: Color, title: String, detail: String)] = [
         ("hand.tap.fill", Theme.sky, "Tap to slide", "Tap a tile next to the gap."),
         ("eye.fill", Theme.purple, "Hold to peek", "Hold the board to see the photo."),
-        ("text.bubble.fill", Theme.green, "Flip for clues", "The words on the back help."),
         ("iphone.gen3.radiowaves.left.and.right", Theme.yellow, "Shake to shuffle", "Mixed up? Start over."),
     ]
 
@@ -87,7 +86,7 @@ struct HowToPlayOverlay: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("How to play").font(Theme.display(26))
-                Text("Four ways to crack a story")
+                Text("Three ways to crack a story")
                     .font(Theme.body(14, weight: .medium))
                     .opacity(0.85)
             }

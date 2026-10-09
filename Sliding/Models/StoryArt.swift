@@ -127,6 +127,8 @@ struct MessagePaper<Message: View>: View {
                     message(scale)
                     Text("— \(from)")
                         .font(Theme.body(32 * scale, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                         .foregroundStyle(Theme.orange)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
@@ -140,7 +142,7 @@ struct MessagePaper<Message: View>: View {
 
 extension UIImage {
     /// Center-crops to a square (and bakes in orientation), capped at `maxSide` pixels.
-    func squareCropped(maxSide: CGFloat = 1200) -> UIImage {
+    nonisolated func squareCropped(maxSide: CGFloat = 1200) -> UIImage {
         let side = min(size.width, size.height)
         let target = min(side * scale, maxSide)
         let format = UIGraphicsImageRendererFormat()
@@ -154,7 +156,7 @@ extension UIImage {
     }
 
     /// Cuts the image into n×n tiles, row by row. Tile id k lives at index k-1.
-    func slices(_ n: Int) -> [UIImage] {
+    nonisolated func slices(_ n: Int) -> [UIImage] {
         guard let cg = cgImage else { return [] }
         let w = cg.width / n, h = cg.height / n
         return (0..<(n * n)).compactMap { i in

@@ -7,22 +7,33 @@
 import SwiftUI
 
 /// A minimal back-camera capture session. `isAvailable` stays false where there is
-/// no camera (the Simulator) or access was denied.
+/// no camera (the Simulator) or access was denied; `isDenied` tells the two apart.
 @Observable
 final class CameraModel: NSObject, AVCapturePhotoCaptureDelegate {
     /// Created only once a camera is found, since SwiftUI may construct this model many times.
     private(set) var session: AVCaptureSession?
     var isAvailable: Bool { session != nil }
+    /// The person said no to camera access (or it's restricted), so only Settings can turn it back on.
+    private(set) var isDenied = false
+    /// True until the first start finishes, whether or not a camera turned up.
+    private(set) var isStarting = true
     private var device: AVCaptureDevice?
     private var subjectChangeObserver: NSObjectProtocol?
     private let output = AVCapturePhotoOutput()
     private var pendingCapture: CheckedContinuation<UIImage?, Never>?
 
     func start() async {
+        defer { isStarting = false }
+        if isStarting { await FakeLatency.wait(1.2) }
         if session == nil {
-            guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-                  await AVCaptureDevice.requestAccess(for: .video),
-                  let input = try? AVCaptureDeviceInput(device: device) else { return }
+            guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            else { return }
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                isDenied = true
+                return
+            }
+            isDenied = false
+            guard let input = try? AVCaptureDeviceInput(device: device) else { return }
             let newSession = AVCaptureSession()
             newSession.beginConfiguration()
             newSession.sessionPreset = .photo

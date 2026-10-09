@@ -7,14 +7,19 @@
 
 import SwiftUI
 
-/// Received is the home screen. Archive and Connections live in the top-right menu,
-/// and the floating camera button starts the send flow.
+/// Home: Received and Sent, switched with the two cards at the top. Archive and Connections
+/// live in the top-right menu, and the floating camera button starts the send flow.
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var path: [Route] = []
-    @State private var showConnections = false
+    @Environment(AuthModel.self) private var auth
+    @State private var box: Box = .received
+
+    enum Box { case received, sent }
 
     private var toSolve: Int { model.received.filter { !$0.isSolved }.count }
+    private var stillSolving: Int { model.sent.filter { !$0.isSolvedByEveryone }.count }
+    private var shown: [Story] { box == .received ? model.received : model.sent }
 
     var body: some View {
         @Bindable var model = model
@@ -22,13 +27,13 @@ struct ContentView: View {
             List {
                 Group {
                     summary
-                    SectionLabel(title: "Waiting for you")
+                    SectionLabel(title: box == .received ? "Waiting for you" : "Sent by you")
                 }
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
 
-                ForEach(model.received) { story in
+                ForEach(shown) { story in
                     ZStack {
                         // Hidden link keeps navigation without the list's disclosure chevron.
                         NavigationLink(value: Route.story(story.id)) { EmptyView() }
@@ -39,20 +44,28 @@ struct ContentView: View {
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
                     .swipeActions {
-                        Button("Archive", systemImage: "archivebox") {
-                            withAnimation { story.isArchived = true }
+                        if !story.isSent {
+                            Button("Archive", systemImage: "archivebox") {
+                                model.setArchived(story, true)
+                            }
+                            .tint(Theme.ink)
                         }
-                        .tint(Theme.ink)
                     }
                 }
 
-                if model.received.isEmpty {
+                if shown.isEmpty {
                     Group {
-                        if model.isLoaded {
+                        if !model.isLoaded {
+                            PlayfulLoader(lines: ["Fetching your postcards…", "Shaking the mailbag…",
+                                                  "Unsticking the stamps…"], size: 44)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 56)
+                        } else if box == .received {
                             EmptyMessage(title: "All quiet for now",
                                          message: "When someone sends you a story, it'll show up here, scrambled and waiting.")
                         } else {
-                            ProgressView().frame(maxWidth: .infinity).padding(30)
+                            EmptyMessage(title: "Nothing sent yet",
+                                         message: "Tap the camera to send your first story.")
                         }
                     }
                     .listRowBackground(Color.clear)
@@ -61,6 +74,7 @@ struct ContentView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .refreshable { await model.refresh() }
             .contentMargins(.bottom, 110, for: .scrollContent)
             .safeAreaInset(edge: .top) { header }
             .toolbar(.hidden, for: .navigationBar)
@@ -69,6 +83,10 @@ struct ContentView: View {
                 switch route {
                 case .archive:
                     ArchiveView()
+                case .connections:
+                    ConnectionsView()
+                case .profile:
+                    ProfileView()
                 case .story(let id):
                     if let story = model.story(id: id) {
                         StoryViewerView(story: story)
@@ -76,12 +94,16 @@ struct ContentView: View {
                 }
             }
         }
-        .task { await model.loadSampleData() }
+        // Loads (or reloads) the mailbox for whoever is signed in.
+        .task(id: auth.profile?.userID) {
+            if let profile = auth.profile { await model.load(as: Person(profile)) }
+        }
         .overlay(alignment: .bottom) {
             VStack(spacing: 14) {
                 if let toast = model.toast {
                     Label(toast, systemImage: "paperplane.fill")
                         .font(Theme.body(14, weight: .semibold))
+                        .lineLimit(1)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 12)
@@ -99,6 +121,7 @@ struct ContentView: View {
                         .transition(.scale.combined(with: .opacity))
                 }
             }
+            .padding(.horizontal, 24)
             .padding(.bottom, 8)
             .animation(.spring, value: model.toast)
             .animation(.spring, value: path.isEmpty)
@@ -111,24 +134,30 @@ struct ContentView: View {
                 .transition(.opacity)
             }
         }
-        .sheet(isPresented: $showConnections) {
-            ConnectionsSheet()
-                .environment(model)
-                .presentationDetents([.medium, .large])
-        }
         .fullScreenCover(isPresented: $model.isComposing) {
             SendFlowView()
                 .environment(model)
+                .environment(auth)
         }
+    }
+
+    /// "Hi Rose", using the first word of your name.
+    private var greeting: String {
+        guard let first = auth.profile?.displayName.split(separator: " ").first else { return "Hi there" }
+        return "Hi \(first)"
     }
 
     private var header: some View {
         HStack(alignment: .center) {
-            Text("Hi there")
+            Text(greeting)
                 .font(Theme.display(32))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .layoutPriority(1)
             Spacer()
             Menu {
-                Button("Connections", systemImage: "person.2") { showConnections = true }
+                Button("Profile", systemImage: "person.crop.circle") { path.append(.profile) }
+                Button("Connections", systemImage: "person.2") { path.append(.connections) }
                 Button("Archive", systemImage: "archivebox") { path.append(.archive) }
             } label: {
                 Image(systemName: "ellipsis")
@@ -145,60 +174,83 @@ struct ContentView: View {
         .background(Theme.cream)
     }
 
-    /// A tilted orange card that opens the next story to solve, and a sand card for the Archive.
+    /// Received and Sent. The one showing is orange, tilted and floating; the other sits on sand.
     private var summary: some View {
         HStack(spacing: 14) {
-            Button {
-                if let next = model.nextToSolve { path.append(.story(next.id)) }
-            } label: {
-                VStack(alignment: .leading) {
-                    HStack(alignment: .top) {
-                        Image(systemName: toSolve == 0 ? "checkmark" : "puzzlepiece.fill")
-                            .font(.system(size: 18, weight: .semibold))
-                            .frame(width: 44, height: 44)
-                            .background(.white.opacity(0.25), in: Circle())
-                        Spacer()
-                        Text("\(toSolve)").font(Theme.display(36))
-                    }
-                    Spacer()
-                    Text(toSolve == 0 ? "ALL SOLVED" : "SOLVE NEXT →")
-                        .font(Theme.display(15))
-                        .kerning(0.5)
-                }
-                .foregroundStyle(.white)
-                .padding(18)
-                .frame(height: 130)
-                .wavyCard(Theme.orange)
-                .floaty(tilt: -2, seed: 0.2)
-            }
-            .buttonStyle(.plain)
-            .disabled(toSolve == 0)
-            .accessibilityLabel(toSolve == 0 ? "All stories solved" : "\(toSolve) to solve. Open the next one.")
-
-            Button {
-                path.append(.archive)
-            } label: {
-                VStack(alignment: .trailing) {
-                    HStack(alignment: .top) {
-                        Image(systemName: "archivebox.fill")
-                            .font(.system(size: 17, weight: .semibold))
-                            .frame(width: 44, height: 44)
-                            .background(Theme.paper, in: Circle())
-                        Spacer()
-                        Text("\(model.archived.count)").font(Theme.display(36))
-                    }
-                    Spacer()
-                    Text("ARCHIVE").font(Theme.display(15)).kerning(0.5).foregroundStyle(Theme.muted)
-                }
-                .foregroundStyle(Theme.ink)
-                .padding(18)
-                .frame(height: 118)
-                .softCard()
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Archive, \(model.archived.count) stories")
+            BoxCard(title: "Received", symbol: "tray.fill", count: model.isLoaded ? model.received.count : nil,
+                    detail: !model.isLoaded ? "Loading…" : toSolve == 0 ? "All solved" : "\(toSolve) to solve",
+                    selected: box == .received, tilt: -2) { select(.received) }
+            BoxCard(title: "Sent", symbol: "paperplane.fill", count: model.isLoaded ? model.sent.count : nil,
+                    detail: !model.isLoaded ? "Loading…" : stillSolving == 0 ? "All solved" : "\(stillSolving) being solved",
+                    selected: box == .sent, tilt: 2) { select(.sent) }
         }
         .padding(.vertical, 8)
+    }
+
+    private func select(_ new: Box) {
+        guard new != box else { return }
+        Haptics.shared.tick(intensity: 0.6)
+        withAnimation(.spring(duration: 0.4, bounce: 0.3)) { box = new }
+    }
+}
+
+/// One of the two cards on home. Selected: orange with waves, tilted and floating.
+private struct BoxCard: View {
+    let title: String
+    let symbol: String
+    /// Nil while loading.
+    let count: Int?
+    let detail: String
+    let selected: Bool
+    let tilt: Double
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .top) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .background(selected ? .white.opacity(0.25) : Theme.paper, in: Circle())
+                    Spacer()
+                    Text(count.map { "\($0)" } ?? "–")
+                        .font(Theme.display(36))
+                        .fixedSize()
+                        .contentTransition(.numericText())
+                }
+                Spacer(minLength: 8)
+                Text(title.uppercased())
+                    .font(Theme.display(15))
+                    .kerning(0.5)
+                Text(detail)
+                    .font(Theme.body(13, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(selected ? .white.opacity(0.85) : Theme.muted)
+            }
+            .foregroundStyle(selected ? .white : Theme.ink)
+            .padding(18)
+            .frame(height: selected ? 136 : 124)
+            .modifier(BoxBackground(selected: selected, tilt: tilt))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(count.map { "\($0)" } ?? ""). \(detail)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+private struct BoxBackground: ViewModifier {
+    let selected: Bool
+    let tilt: Double
+
+    func body(content: Content) -> some View {
+        if selected {
+            content.wavyCard(Theme.orange)
+                .floaty(tilt: tilt, seed: tilt < 0 ? 0.2 : 0.7)
+                .shadow(color: Theme.orange.opacity(0.3), radius: 12, y: 6)
+        } else {
+            content.softCard()
+        }
     }
 }
 
@@ -253,7 +305,7 @@ struct ArchiveView: View {
                         .buttonStyle(.plain)
                         .contextMenu {
                             Button("Move to Received", systemImage: "tray.and.arrow.up") {
-                                withAnimation { story.isArchived = false }
+                                model.setArchived(story, false)
                             }
                         }
                     }
@@ -270,14 +322,15 @@ private struct ArchiveCard: View {
     let story: Story
 
     var body: some View {
-        PuzzleBoard(puzzle: story.puzzle, tiles: story.photoTiles, whole: story.photo, cornerRadius: Theme.corner)
+        StoryThumbnail(story: story, cornerRadius: Theme.corner)
             .overlay(alignment: .bottomLeading) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("FROM \(story.from.uppercased())")
+                    Text("FROM \(story.senderLabel.uppercased())")
                         .font(Theme.display(11))
+                        .lineLimit(1)
                         .kerning(0.6)
                         .opacity(0.85)
-                    Text(story.isSolved ? story.caption : "Not solved yet")
+                    Text(story.isSolved ? (story.caption.isEmpty ? "Solved" : story.caption) : "Not solved yet")
                         .font(Theme.display(17))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -292,74 +345,6 @@ private struct ArchiveCard: View {
                                                   style: .continuous))
             }
             .accessibilityElement(children: .combine)
-    }
-}
-
-/// People who can send you stories and receive yours.
-struct ConnectionsSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-    @State private var isAdding = false
-    @State private var newName = ""
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach(model.connections) { connection in
-                        HStack(spacing: 14) {
-                            Avatar(name: connection.name)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(connection.name).font(Theme.display(17))
-                                Text(summary(for: connection.name))
-                                    .font(Theme.body(14))
-                                    .foregroundStyle(Theme.muted)
-                            }
-                            Spacer()
-                        }
-                        .foregroundStyle(Theme.ink)
-                        .padding(8)
-                        .padding(.trailing, 10)
-                        .softCard(radius: 40)
-                        .contextMenu {
-                            Button("Remove", systemImage: "trash", role: .destructive) {
-                                model.connections.removeAll { $0.id == connection.id }
-                            }
-                        }
-                    }
-
-                    Button("Add connection", systemImage: "person.badge.plus") {
-                        newName = ""
-                        isAdding = true
-                    }
-                    .buttonStyle(PrimaryButtonStyle(fullWidth: true))
-                    .padding(.top, 8)
-                }
-                .padding(20)
-            }
-            .screenBackground()
-            .screenTitle("Connections")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .alert("Add connection", isPresented: $isAdding) {
-                TextField("Name", text: $newName)
-                Button("Add") { model.addConnection(named: newName) }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("They'll be able to send you stories, and you can send them yours.")
-            }
-        }
-        .tint(Theme.ink)
-    }
-
-    private func summary(for name: String) -> String {
-        let received = model.stories(from: name)
-        guard let latest = received.first else { return "Hasn't sent a story yet" }
-        let count = received.count == 1 ? "1 story" : "\(received.count) stories"
-        return "\(count) · last \(latest.sentAt.formatted(.relative(presentation: .named)))"
     }
 }
 

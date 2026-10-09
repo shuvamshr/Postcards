@@ -117,8 +117,18 @@ struct PuzzleBoard: View {
 }
 
 /// A card that flips around its vertical axis, showing `back` past the halfway point.
+/// The angle can go past 360; only where it lands matters.
+/// With a `thickness`, the card shows a solid edge while it's side-on, like a real card.
+///
+/// By default each face is drawn flat at rest, so text fields on it edit normally. With `steady`,
+/// the card is drawn the same way at every angle instead, so a drag that turns it isn't cancelled
+/// by the card being rebuilt partway through.
 struct FlipCard<Front: View, Back: View>: View, Animatable {
     var angle: Double
+    var thickness: CGFloat = 0
+    var cornerRadius: CGFloat = 0
+    var edgeColor: Color = Theme.paper
+    var steady = false
     @ViewBuilder var front: Front
     @ViewBuilder var back: Back
 
@@ -127,21 +137,60 @@ struct FlipCard<Front: View, Back: View>: View, Animatable {
         set { angle = newValue }
     }
 
+    /// The angle folded into 0..<360.
+    private var turn: Double {
+        let a = angle.truncatingRemainder(dividingBy: 360)
+        return a < 0 ? a + 360 : a
+    }
+
     var body: some View {
-        // At rest, show each face untransformed so text fields on it edit normally.
-        if angle < 0.5 {
+        let turn = turn
+        let showsFront = turn < 90 || turn > 270
+        if !steady && (turn < 0.5 || turn > 359.5) {
             front
-        } else if angle > 179.5 {
+        } else if !steady && abs(turn - 180) < 0.5 {
             back
         } else {
             ZStack {
-                if angle < 90 {
-                    front
-                } else {
-                    back.rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0))
+                // Both faces stay in place; the hidden one is just invisible and can't be touched.
+                front
+                    .opacity(showsFront ? 1 : 0)
+                    .allowsHitTesting(showsFront)
+                back
+                    .rotation3DEffect(.degrees(180), axis: (x: 0, y: 1, z: 0))
+                    .opacity(showsFront ? 0 : 1)
+                    .allowsHitTesting(!showsFront)
+            }
+            .rotation3DEffect(.degrees(turn), axis: (x: 0, y: 1, z: 0), perspective: 0.4)
+            // A soft, faint shadow that grows a little as the card lifts side-on.
+            .shadow(color: .black.opacity(thickness > 0 ? 0.18 * abs(sin(turn * .pi / 180)) : 0),
+                    radius: 10, y: 6)
+            // As a background, the edge takes exactly the card's size and never changes the layout.
+            .background { edge(turn: turn, showsFront: showsFront) }
+        }
+    }
+
+    /// The card's body behind the face you can see, drawn as thin slices stepped back in depth.
+    /// Seen face-on they hide behind the face; side-on they spread out into a solid edge.
+    @ViewBuilder
+    private func edge(turn: Double, showsFront: Bool) -> some View {
+        if thickness > 0 {
+            let radians = turn * .pi / 180
+            // Depth projects sideways by sin(angle); the body sits behind whichever face is showing.
+            let shift = -sin(radians) * (showsFront ? 1 : -1)
+            let slices = max(2, Int(thickness.rounded()))
+            // A gentle shade as the card turns side-on, just enough to read as an edge.
+            let shade = 0.08 * abs(sin(radians))
+            ZStack {
+                ForEach(1...slices, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(edgeColor)
+                        .overlay(Color.black.opacity(shade))
+                        .rotation3DEffect(.degrees(turn), axis: (x: 0, y: 1, z: 0), perspective: 0.4)
+                        .offset(x: shift * thickness * CGFloat(i) / CGFloat(slices))
                 }
             }
-            .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.4)
+            .allowsHitTesting(false)
         }
     }
 }

@@ -14,6 +14,7 @@ nonisolated enum SendStep: Hashable {
 /// Presented full screen from the camera button.
 struct SendFlowView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppModel.self) private var model
     @State private var draft = SendDraft()
     @State private var path: [SendStep] = []
 
@@ -33,6 +34,8 @@ struct SendFlowView: View {
         // Compose is black like a camera; Send goes back to the light app style.
         .preferredColorScheme(path.isEmpty ? .dark : .light)
         .tint(Theme.ink)
+        // Start with whoever you sent to last time.
+        .onAppear { draft = model.newDraft() }
     }
 }
 
@@ -43,13 +46,17 @@ struct SendFlowView: View {
 struct ComposeScreen: View {
     @Bindable var draft: SendDraft
     var onDone: () -> Void
+    @Environment(AuthModel.self) private var auth
 
     private enum Stage { case capture, review, write }
 
     @State private var stage: Stage = .capture
     @State private var camera = CameraModel()
+    @Environment(\.openURL) private var openURL
     @State private var pickerItem: PhotosPickerItem?
     @State private var isCapturing = false
+    /// A photo is on its way in, from the shutter or the library.
+    @State private var developing = false
     /// Where the viewfinder was last tapped to focus; a new id replays the focus square.
     @State private var focusPoint: CGPoint?
     @State private var focusTap = UUID()
@@ -135,10 +142,13 @@ struct ComposeScreen: View {
         .onDisappear { camera.stop() }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
+            withAnimation { developing = true }
             Task {
-                if let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data) {
-                    usePicked(image)
-                }
+                async let wait: Void = FakeLatency.wait(1.0)
+                let data = try? await item.loadTransferable(type: Data.self)
+                await wait
+                if let data, let image = UIImage(data: data) { usePicked(image) }
+                withAnimation { developing = false }
                 pickerItem = nil
             }
         }
@@ -158,7 +168,15 @@ struct ComposeScreen: View {
     /// Live camera until a photo is taken, then the photo itself.
     private var photoSide: some View {
         ZStack {
-            if stage == .review, let original = draft.original {
+            if developing {
+                Color(white: 0.12)
+                PlayfulLoader(lines: ["Developing your photo…", "Shaking the Polaroid…"], size: 46, onDark: true)
+                    .transition(.opacity)
+            } else if camera.isStarting && draft.photo == nil {
+                Color(white: 0.12)
+                PlayfulLoader(lines: ["Warming up the camera…", "Polishing the lens…"], size: 46, onDark: true)
+                    .transition(.opacity)
+            } else if stage == .review, let original = draft.original {
                 // Picked from the library: pinch and drag to choose the square.
                 PhotoCropper(image: original, scale: $draft.cropScale, offset: $draft.cropOffset)
             } else if let photo = draft.photo {
@@ -179,6 +197,30 @@ struct ComposeScreen: View {
                             .position(focusPoint)
                     }
                 }
+            } else if camera.isDenied {
+                // Camera access was turned off: only Settings can turn it back on.
+                ZStack {
+                    Color(white: 0.16)
+                    VStack(spacing: 14) {
+                        Image(systemName: "video.slash.fill")
+                            .font(.system(size: 34, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.55))
+                        VStack(spacing: 4) {
+                            Text("Camera is off")
+                                .font(Theme.display(19))
+                                .foregroundStyle(.white)
+                            Text("Postcards needs the camera to take your photo.")
+                                .font(Theme.body(14, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .multilineTextAlignment(.center)
+                        }
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
+                    }
+                    .padding(24)
+                }
             } else {
                 // No camera (the Simulator): a dark viewfinder, so a taken photo is clearly different.
                 ZStack {
@@ -192,15 +234,18 @@ struct ComposeScreen: View {
                     .foregroundStyle(.white.opacity(0.55))
                 }
             }
-            GridOverlay(n: draft.gridSize)
-                .allowsHitTesting(false)
+            // The grid waits until there's something to cut, so it never runs through a loader or message.
+            if !developing && (draft.photo != nil || camera.isAvailable) {
+                GridOverlay(n: draft.gridSize)
+                    .allowsHitTesting(false)
+            }
         }
         .aspectRatio(1, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
     private var messageSide: some View {
-        MessagePaper(from: "You") { scale in
+        MessagePaper(from: auth.profile?.displayName ?? "You") { scale in
             MessageText(text: draft.caption, placeholder: Self.placeholder,
                         showsCursor: captionFocused, scale: scale)
                 .transaction { $0.animation = nil }   // keystrokes appear instantly
@@ -282,7 +327,7 @@ struct ComposeScreen: View {
                 .shadow(color: Theme.orange.opacity(0.4), radius: 12, y: 5)
         }
         .buttonStyle(.plain)
-        .disabled(isCapturing)
+        .disabled(isCapturing || developing || camera.isStarting || !canShoot)
         .accessibilityLabel("Take photo")
     }
 
@@ -299,9 +344,16 @@ struct ComposeScreen: View {
     private var hint: String {
         switch stage {
         case .capture:
-            camera.isAvailable
-                ? "Find a moment worth puzzling over. It becomes a \(draft.gridSize)×\(draft.gridSize) puzzle."
-                : "No camera here, so the shutter grabs a sample photo. Or pick one from your library."
+            if camera.isStarting { " " }
+            else if camera.isAvailable {
+                "Find a moment worth puzzling over. It becomes a \(draft.gridSize)×\(draft.gridSize) puzzle."
+            } else if camera.isDenied {
+                "Turn the camera on in Settings, or pick a photo from your library."
+            } else if usesSamplePhoto {
+                "No camera here, so the shutter grabs a sample photo. Or pick one from your library."
+            } else {
+                "No camera here. Pick a photo from your library."
+            }
         case .review:
             draft.original == nil
                 ? "Looking good? Use it, or try another."
@@ -313,11 +365,28 @@ struct ComposeScreen: View {
 
     // MARK: Actions
 
+    /// Where there's no camera (the Simulator), debug builds let the shutter grab a sample photo
+    /// so the flow can be tried. Never when access was denied, and never in release builds.
+    private var usesSamplePhoto: Bool {
+        #if DEBUG
+        !camera.isAvailable && !camera.isDenied
+        #else
+        false
+        #endif
+    }
+
+    private var canShoot: Bool { camera.isAvailable || usesSamplePhoto }
+
     private func shoot() {
-        guard camera.isAvailable else { return use(StoryArt.samplePhoto()) }
+        guard canShoot else { return }
         isCapturing = true
+        withAnimation { developing = true }
         Task {
-            if let image = await camera.capture() { use(image) }
+            async let wait: Void = FakeLatency.wait(0.9)
+            let image = camera.isAvailable ? await camera.capture() : StoryArt.samplePhoto()
+            await wait
+            if let image { use(image) }
+            withAnimation { developing = false }
             isCapturing = false
         }
     }
@@ -403,59 +472,116 @@ struct RecipientsScreen: View {
     let draft: SendDraft
     var onSent: () -> Void
     @Environment(AppModel.self) private var model
+    @Environment(AuthModel.self) private var auth
+    @State private var sending = false
 
-    private var selectedNames: [String] { model.connections.filter(\.isSelected).map(\.name) }
+    private var selectedNames: [String] {
+        model.connected.filter { draft.recipientIDs.contains($0.id) }.map(\.name)
+    }
+    private var recipientCount: Int { selectedNames.count + (draft.includesMe ? 1 : 0) }
 
     private var sendTitle: String {
-        switch selectedNames.count {
+        let names = selectedNames + (draft.includesMe ? ["me"] : [])
+        return switch names.count {
         case 0: "Choose someone"
-        case 1...2: "Send to \(selectedNames.joined(separator: " & "))"
-        default: "Send to \(selectedNames.count) people"
+        case 1...3: "Send to \(Story.summary(of: names))"
+        default: "Send to \(names.count) people"
         }
     }
 
     var body: some View {
-        @Bindable var model = model
         ScrollView {
             VStack(spacing: 10) {
                 preview
                 SectionLabel(title: "Who should solve it")
 
-                ForEach($model.connections) { $connection in
+                meRow
+
+                // Only people who've accepted can be sent to.
+                ForEach(model.connected) { connection in
+                    let selected = draft.recipientIDs.contains(connection.id)
                     Button {
-                        withAnimation(.snappy) { connection.isSelected.toggle() }
+                        withAnimation(.snappy) {
+                            if selected { draft.recipientIDs.remove(connection.id) }
+                            else { draft.recipientIDs.insert(connection.id) }
+                        }
                     } label: {
                         HStack(spacing: 14) {
-                            Avatar(name: connection.name, ringed: connection.isSelected)
-                            Text(connection.name).font(Theme.display(17))
+                            Avatar(name: connection.name, ringed: selected)
+                            Text(connection.name).font(Theme.display(17)).lineLimit(1)
                             Spacer()
-                            Image(systemName: connection.isSelected ? "checkmark.circle.fill" : "circle")
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                                 .font(.system(size: 24, weight: .semibold))
-                                .opacity(connection.isSelected ? 1 : 0.35)
+                                .opacity(selected ? 1 : 0.35)
                         }
-                        .foregroundStyle(connection.isSelected ? .white : Theme.ink)
+                        .foregroundStyle(selected ? .white : Theme.ink)
                         .padding(8)
                         .padding(.trailing, 10)
-                        .modifier(SelectableRow(selected: connection.isSelected))
+                        .modifier(SelectableRow(selected: selected))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityAddTraits(connection.isSelected ? .isSelected : [])
+                    .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
             .padding(20)
         }
         .screenBackground()
         .screenTitle("Send")
-        .safeAreaInset(edge: .bottom) {
-            Button(sendTitle) {
-                model.send(draft)
-                onSent()
+        .overlay {
+            if sending {
+                SendingOverlay(photo: draft.photo)
+                    .transition(.opacity)
             }
+        }
+        .navigationBarBackButtonHidden(sending)
+        .safeAreaInset(edge: .bottom) {
+            Button(sendTitle, action: send)
             .buttonStyle(PrimaryButtonStyle(fullWidth: true))
-            .disabled(selectedNames.isEmpty)
+            .disabled(recipientCount == 0 || sending)
             .padding(20)
             .background(Theme.cream)
         }
+    }
+
+    private func send() {
+        withAnimation(.spring(duration: 0.4)) { sending = true }
+        Task {
+            if await model.send(draft) {
+                onSent()
+            } else {
+                withAnimation { sending = false }
+            }
+        }
+    }
+
+    /// Send yourself a copy to solve too. Shows up in Received, and in Sent once you've solved it.
+    private var meRow: some View {
+        let selected = draft.includesMe
+        return Button {
+            withAnimation(.snappy) { draft.includesMe.toggle() }
+        } label: {
+            HStack(spacing: 14) {
+                // Same bubble you appear as in Sent and Received.
+                Avatar(name: "You", ringed: selected)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Me").font(Theme.display(17))
+                    Text("Solve it yourself too")
+                        .font(Theme.body(13, weight: .medium))
+                        .opacity(0.75)
+                }
+                Spacer()
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 24, weight: .semibold))
+                    .opacity(selected ? 1 : 0.35)
+            }
+            .foregroundStyle(selected ? .white : Theme.ink)
+            .padding(8)
+            .padding(.trailing, 10)
+            .modifier(SelectableRow(selected: selected))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Me, solve it yourself too")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     /// What's being sent: the photo and the message.
@@ -494,5 +620,58 @@ private struct SelectableRow: ViewModifier {
         } else {
             content.softCard(radius: 38)
         }
+    }
+}
+
+/// While a story is sending: the postcard gets stamped, then waits for the post.
+private struct SendingOverlay: View {
+    let photo: UIImage?
+    @State private var stamped = false
+
+    var body: some View {
+        ZStack {
+            Theme.cream.opacity(0.92).ignoresSafeArea()
+            VStack(spacing: 28) {
+                ZStack(alignment: .topTrailing) {
+                    Group {
+                        if let photo {
+                            Image(uiImage: photo).resizable().scaledToFill()
+                        } else {
+                            Theme.sand
+                        }
+                    }
+                    .frame(width: 170, height: 170)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(10)
+                    .background(Theme.paper, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                    .shadow(color: Theme.ink.opacity(0.12), radius: 18, y: 10)
+
+                    // The stamp thumps down from above.
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 52)
+                        .background(Theme.orange, in: RoundedRectangle(cornerRadius: 6))
+                        .padding(4)
+                        .background(Theme.paper, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Theme.sand, style: StrokeStyle(lineWidth: 2, dash: [3, 3])))
+                        .rotationEffect(.degrees(stamped ? 10 : -20))
+                        .scaleEffect(stamped ? 1 : 2.2)
+                        .opacity(stamped ? 1 : 0)
+                        .offset(x: 14, y: -16)
+                }
+                .floaty(tilt: -3, seed: 0.5)
+
+                LoadingMessage(lines: ["Licking the stamp…", "Popping it in the post…", "Off it goes!"])
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .milliseconds(250))
+            withAnimation(.spring(duration: 0.35, bounce: 0.45)) { stamped = true }
+            Haptics.shared.tick(intensity: 0.8)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Sending")
     }
 }

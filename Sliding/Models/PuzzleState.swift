@@ -8,7 +8,7 @@ import Foundation
 /// A sliding-tile puzzle on an n×n board.
 /// `tiles[position]` holds a tile id (1...count-1), and 0 marks the empty slot.
 /// The photo and the message share one PuzzleState, so they always move together.
-nonisolated struct PuzzleState: Equatable {
+nonisolated struct PuzzleState: Equatable, Codable, Sendable {
     let n: Int
     private(set) var tiles: [Int]
 
@@ -33,6 +33,23 @@ nonisolated struct PuzzleState: Equatable {
     /// Where a tile currently sits. Once solved, the final piece (id == count) fills the empty slot.
     func position(of id: Int) -> Int {
         id == count ? blank : tiles.firstIndex(of: id)!
+    }
+
+    /// A scramble made of `moves` random slides, plus the taps that solve it again in order.
+    /// Used by the onboarding demo, which plays the solution back.
+    static func scrambled(n: Int, moves: Int) -> (puzzle: PuzzleState, solution: [Int]) {
+        var puzzle = solved(n: n)
+        var undo: [Int] = []
+        var previous = -1
+        for _ in 0..<moves {
+            let empty = puzzle.blank
+            let pick = puzzle.neighbors(of: empty).filter { $0 != previous }.randomElement()!
+            puzzle.tiles.swapAt(pick, empty)
+            // The tile now sits where the gap was; tapping it there slides it back.
+            undo.append(empty)
+            previous = empty
+        }
+        return (puzzle, undo.reversed())
     }
 
     func neighbors(of position: Int) -> [Int] {
